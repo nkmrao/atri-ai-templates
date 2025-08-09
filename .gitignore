@@ -1,0 +1,84 @@
+# ========================
+# Python
+# ========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+wheels/
+share/python-wheels/
+pip-wheel-metadata/
+*.manifest
+*.spec
+
+# ========================
+# FastAPI / General
+# ========================
+# Environment variables
+.env
+.env.*
+# Local configuration
+*.local
+*.dev
+
+# ========================
+# Virtual Environments
+# ========================
+venv/
+env/
+ENV/
+.venv/
+.envrc
+
+# ========================
+# VSCode / Editors
+# ========================
+.vscode/
+.idea/
+*.swp
+
+# ========================
+# Logs
+# ========================
+*.log
+logs/
+*.out
+*.err
+
+# ========================
+# Pytest / Coverage
+# ========================
+.pytest_cache/
+.coverage
+htmlcov/
+.cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+
+# ========================
+# Mypy / Type Checking
+# ========================
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ========================
+# Jupyter Notebooks
+# ========================
+.ipynb_checkpoints
+
+# ========================
+# macOS / OS files
+# ========================
+.DS_Store
+Thumbs.db

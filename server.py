@@ -1,0 +1,287 @@
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any, Literal
+from supabase import create_client, Client
+import json
+import os
+import logging
+from contextlib import asynccontextmanager
+import uvicorn
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Supabase client
+supabase: Optional[Client] = None
+
+# Pydantic models
+class InitializeProjectRequest(BaseModel):
+    project_id: str
+    username: str
+    project_name: str
+    chat_api_key: str
+    chat_templates_config: Optional[Dict[str, Any]] = None
+    search_api_key: str
+    search_templates_config: Optional[Dict[str, Any]] = None
+
+class ReadTemplateConfigRequest(BaseModel):
+    product_type: Literal['chat', 'search']
+    api_key: str
+    template_name: str
+
+class ModifyTemplateConfigRequest(BaseModel):
+    product_type: Literal['chat', 'search']
+    api_key: str
+    template_name: str
+    updated_config: Dict[str, Any]
+
+class DeleteProjectRequest(BaseModel):
+    api_key: str
+
+class TemplateConfigResponse(BaseModel):
+    template_config: Dict[str, Any]
+
+class SuccessResponse(BaseModel):
+    message: str
+    success: bool = True
+
+# Supabase client function
+def get_supabase_client() -> Client:
+    """Get Supabase client"""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase client not available")
+    return supabase
+
+# Lifespan context manager for Supabase client initialization
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global supabase
+    
+    # Startup
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_KEY")
+    
+    if not supabase_url or not supabase_key:
+        raise RuntimeError("SUPABASE_URL and SUPABASE_KEY environment variables are required")
+    
+    try:
+        supabase = create_client(supabase_url, supabase_key)
+        logger.info("Supabase client initialized successfully")
+        yield
+    except Exception as e:
+        logger.error(f"Failed to initialize Supabase client: {e}")
+        raise
+    finally:
+        # Shutdown
+        logger.info("Supabase client cleanup completed")
+
+# FastAPI app
+app = FastAPI(
+    title="Templates Config Service",
+    description="API for managing template configurations in Supabase",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure appropriately for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.post("/initialize-new-project", response_model=SuccessResponse)
+async def initialize_new_project(request: InitializeProjectRequest):
+    """Add a new project configuration to the database"""
+    client = get_supabase_client()
+    
+    try:
+        # Check if project_id already exists
+        existing_project = client.table("templates_config").select("id").eq("project_id", request.project_id).execute()
+        
+        if existing_project.data:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Project with ID {request.project_id} already exists"
+            )
+        
+        # Prepare data for insertion
+        insert_data = {
+            "project_id": request.project_id,
+            "username": request.username,
+            "project_name": request.project_name,
+            "chat_api_key": request.chat_api_key,
+            "search_api_key": request.search_api_key
+        }
+        
+        # Add optional JSON configs
+        if request.chat_templates_config is not None:
+            insert_data["chat_templates_config"] = request.chat_templates_config
+        
+        if request.search_templates_config is not None:
+            insert_data["search_templates_config"] = request.search_templates_config
+        
+        # Insert new project
+        result = client.table("templates_config").insert(insert_data).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Failed to create project")
+        
+        logger.info(f"Successfully created project: {request.project_id}")
+        return SuccessResponse(message="Project initialized successfully")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error initializing project: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.post("/read-template-config", response_model=TemplateConfigResponse)
+async def read_template_config(request: ReadTemplateConfigRequest):
+    """Read a specific template configuration"""
+    client = get_supabase_client()
+    
+    try:
+        # Determine which API key field and config field to use
+        if request.product_type == 'chat':
+            api_key_field = 'chat_api_key'
+            config_field = 'chat_templates_config'
+        else:  # search
+            api_key_field = 'search_api_key'
+            config_field = 'search_templates_config'
+        
+        # Query the database
+        result = client.table("templates_config").select(config_field).eq(api_key_field, request.api_key).execute()
+        
+        if not result.data:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No project found with the provided {request.product_type} API key"
+            )
+        
+        templates_config = result.data[0][config_field]
+        
+        if not templates_config:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No {request.product_type} templates configuration found"
+            )
+        
+        # Check if template_name exists in the configuration
+        if request.template_name not in templates_config:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Template '{request.template_name}' not found in {request.product_type} configuration"
+            )
+        
+        template_config = templates_config[request.template_name]
+        
+        logger.info(f"Successfully retrieved template config for: {request.template_name}")
+        return TemplateConfigResponse(template_config=template_config)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error reading template config: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.post("/modify-template-config", response_model=SuccessResponse)
+async def modify_template_config(request: ModifyTemplateConfigRequest):
+    """Modify a specific template configuration"""
+    client = get_supabase_client()
+    
+    try:
+        # Determine which API key field and config field to use
+        if request.product_type == 'chat':
+            api_key_field = 'chat_api_key'
+            config_field = 'chat_templates_config'
+        else:  # search
+            api_key_field = 'search_api_key'
+            config_field = 'search_templates_config'
+        
+        # First, get the current configuration
+        result = client.table("templates_config").select(config_field).eq(api_key_field, request.api_key).execute()
+        
+        if not result.data:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No project found with the provided {request.product_type} API key"
+            )
+        
+        current_config = result.data[0][config_field] or {}
+        
+        # Update the specific template
+        current_config[request.template_name] = request.updated_config
+        
+        # Update the database
+        update_result = client.table("templates_config").update({
+            config_field: current_config
+        }).eq(api_key_field, request.api_key).execute()
+        
+        if not update_result.data:
+            raise HTTPException(status_code=404, detail="Project not found or update failed")
+        
+        logger.info(f"Successfully modified template config for: {request.template_name}")
+        return SuccessResponse(message="Template configuration updated successfully")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error modifying template config: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.post("/delete-project", response_model=SuccessResponse)
+async def delete_project(request: DeleteProjectRequest):
+    """Delete a project by API key"""
+    client = get_supabase_client()
+    
+    try:
+        # First check if project exists with either chat_api_key or search_api_key
+        chat_result = client.table("templates_config").select("id").eq("chat_api_key", request.api_key).execute()
+        search_result = client.table("templates_config").select("id").eq("search_api_key", request.api_key).execute()
+        
+        if not chat_result.data and not search_result.data:
+            raise HTTPException(
+                status_code=404, 
+                detail="No project found with the provided API key"
+            )
+        
+        # Delete by chat_api_key
+        if chat_result.data:
+            delete_result = client.table("templates_config").delete().eq("chat_api_key", request.api_key).execute()
+        # Delete by search_api_key
+        else:
+            delete_result = client.table("templates_config").delete().eq("search_api_key", request.api_key).execute()
+        
+        if not delete_result.data:
+            raise HTTPException(status_code=500, detail="Failed to delete project")
+        
+        logger.info(f"Successfully deleted project with API key: {request.api_key[:10]}...")
+        return SuccessResponse(message="Project deleted successfully")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting project: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "service": "templates-config-service"}
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "server:app",
+        host="0.0.0.0",
+        port=8500,
+        log_level="info",
+        reload=False
+    )
