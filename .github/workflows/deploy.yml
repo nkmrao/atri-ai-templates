@@ -1,0 +1,57 @@
+name: Deploy to VPS
+
+# Trigger the workflow on push events to the 'main' branch
+on:
+  push:
+    branches:
+      - main  # Or 'master', or whichever branch you want to deploy from
+
+jobs:
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest # Use the latest stable Ubuntu runner
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4 # Checks out your repository code
+
+    - name: Set up SSH connection
+      # Uses a popular action to configure SSH agent for passwordless access
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ secrets.VPS_SSH_PRIVATE_KEY }} # Use the secret
+
+    - name: Add VPS host to known_hosts
+      # Prevents interactive confirmation prompt for the host key
+      run: |
+        mkdir -p ~/.ssh
+        ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+        chmod 644 ~/.ssh/known_hosts
+
+    - name: Execute deployment commands on VPS
+      # Connects via SSH and runs the deployment script
+      run: |
+        ssh ${{ secrets.VPS_USERNAME }}@${{ secrets.VPS_HOST }} << 'EOF'
+          # Navigate to the project directory (use the secret)
+          cd ${{ secrets.VPS_PROJECT_PATH }}
+
+          # Pull the latest changes from the main branch
+          echo ">>> Pulling latest code..."
+          git checkout main # Ensure we are on the correct branch
+          git pull origin main
+
+          # Stop and remove the old container (if using docker-compose)
+          # Use 'docker stop <container_name> && docker rm <container_name>' if not using compose
+          echo ">>> Stopping existing container(s)..."
+          docker-compose down
+
+          # Build the new Docker image and start the container(s) in detached mode
+          echo ">>> Building and starting new container(s)..."
+          docker-compose up --build -d
+
+          # Optional: Clean up unused Docker images to save space
+          echo ">>> Cleaning up old Docker images..."
+          docker image prune -af
+
+          echo ">>> Deployment successful!"
+        EOF
