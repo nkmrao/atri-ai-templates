@@ -209,7 +209,7 @@ async def read_template_config(request: ReadTemplateConfigRequest):
                 detail=f"No project found for the provided project_id"
             )
         
-        templates_config = json.loads(result.data[0][config_field])
+        templates_config = result.data[0][config_field]
         
         if not templates_config:
             raise HTTPException(
