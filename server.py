@@ -58,8 +58,8 @@ class SuccessResponse(BaseModel):
 class ProxyNewUserMessageRequest(BaseModel):
     project_id: str
     user_message: str
-    chat_id: str
-    consumer_id: Optional[str] = None
+    consumer_id: str
+    chat_id: Optional[str] = None
     test: Optional[bool] = False
 
 class ProxyListConsumerChatsRequest(BaseModel):
