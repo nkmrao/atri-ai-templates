@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any, Literal
+from typing import Optional, Dict, Any, Literal, List
 from supabase import create_client, Client
 import json
 import os
@@ -9,6 +9,7 @@ import logging
 from contextlib import asynccontextmanager
 import uvicorn
 from dotenv import load_dotenv
+import httpx
 
 load_dotenv()
 
@@ -18,6 +19,9 @@ logger = logging.getLogger(__name__)
 
 # Supabase client
 supabase: Optional[Client] = None
+
+# Chat API base URL - configure this according to your setup
+CHAT_API_BASE_URL = os.getenv("CHAT_API_BASE_URL", "http://82.112.227.182:8080")
 
 # Pydantic models
 class InitializeProjectRequest(BaseModel):
@@ -31,7 +35,7 @@ class InitializeProjectRequest(BaseModel):
 
 class ReadTemplateConfigRequest(BaseModel):
     product_type: Literal['chat', 'search']
-    api_key: str
+    project_id: str
     template_name: str
 
 class ModifyTemplateConfigRequest(BaseModel):
@@ -50,12 +54,52 @@ class SuccessResponse(BaseModel):
     message: str
     success: bool = True
 
+# New request models for proxy routes
+class ProxyNewUserMessageRequest(BaseModel):
+    project_id: str
+    user_message: str
+    chat_id: str
+    consumer_id: Optional[str] = None
+    test: Optional[bool] = False
+
+class ProxyListConsumerChatsRequest(BaseModel):
+    project_id: str
+    consumer_id: str
+    test: Optional[bool] = False
+
+class ProxyReadConversationRequest(BaseModel):
+    project_id: str
+    chat_id: str
+    test: Optional[bool] = False
+
 # Supabase client function
 def get_supabase_client() -> Client:
     """Get Supabase client"""
     if not supabase:
         raise HTTPException(status_code=500, detail="Supabase client not available")
     return supabase
+
+# Helper function to get API key by project_id
+async def get_api_key_by_project_id(project_id: str) -> str:
+    """Get API key from chat_api_keys table using project_id"""
+    client = get_supabase_client()
+    
+    try:
+        result = client.table("chat_api_keys").select("api_key").eq("project_id", project_id).execute()
+        
+        if not result.data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No API key found for project_id: {project_id}"
+            )
+        
+        return result.data[0]["api_key"]
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving API key for project_id {project_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving API key: {str(e)}")
 
 # Lifespan context manager for Supabase client initialization
 @asynccontextmanager
@@ -150,20 +194,19 @@ async def read_template_config(request: ReadTemplateConfigRequest):
     
     try:
         # Determine which API key field and config field to use
+        project_id_field = 'project_id'
         if request.product_type == 'chat':
-            api_key_field = 'chat_api_key'
             config_field = 'chat_templates_config'
         else:  # search
-            api_key_field = 'search_api_key'
             config_field = 'search_templates_config'
         
         # Query the database
-        result = client.table("templates_config").select(config_field).eq(api_key_field, request.api_key).execute()
+        result = client.table("templates_config").select(config_field).eq(project_id_field, request.project_id).execute()
         
         if not result.data:
             raise HTTPException(
                 status_code=404, 
-                detail=f"No project found with the provided {request.product_type} API key"
+                detail=f"No project found for the provided project_id"
             )
         
         templates_config = json.loads(result.data[0][config_field])
@@ -271,6 +314,132 @@ async def delete_project(request: DeleteProjectRequest):
     except Exception as e:
         logger.error(f"Error deleting project: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+# New proxy routes
+@app.post("/proxy-new-user-message")
+async def proxy_new_user_message(request: ProxyNewUserMessageRequest):
+    """Proxy route for /newUserMessage - gets API key by project_id and forwards request"""
+    try:
+        # Get API key using project_id
+        api_key = await get_api_key_by_project_id(request.project_id)
+        
+        # Prepare request payload for the chat service
+        chat_request_payload = {
+            "user_message": request.user_message,
+            "chat_id": request.chat_id,
+            "consumer_id": request.consumer_id,
+            "test": request.test
+        }
+        
+        # Make request to chat service
+        async with httpx.AsyncClient(timeout=300.0) as client:  # 5 minute timeout
+            response = await client.post(
+                f"{CHAT_API_BASE_URL}/newUserMessage",
+                json=chat_request_payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                }
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Chat service returned status {response.status_code}: {response.text}")
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Chat service error: {response.text}"
+                )
+            
+            return response.json()
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in proxy_new_user_message: {e}")
+        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
+
+@app.get("/proxy-list-consumer-chats")
+async def proxy_list_consumer_chats(
+    project_id: str,
+    consumer_id: str,
+    test: bool = False
+):
+    """Proxy route for /listAllProjectConsumerChats - gets API key by project_id and forwards request"""
+    try:
+        # Get API key using project_id
+        api_key = await get_api_key_by_project_id(project_id)
+        
+        # Prepare query parameters
+        params = {
+            "consumer_id": consumer_id,
+            "test": test
+        }
+        
+        # Make request to chat service
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.get(
+                f"{CHAT_API_BASE_URL}/listAllProjectConsumerChats",
+                params=params,
+                headers={
+                    "Authorization": f"Bearer {api_key}"
+                }
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Chat service returned status {response.status_code}: {response.text}")
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Chat service error: {response.text}"
+                )
+            
+            return response.json()
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in proxy_list_consumer_chats: {e}")
+        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
+
+@app.get("/proxy-read-conversation")
+async def proxy_read_conversation(
+    project_id: str,
+    chat_id: str,
+    test: bool = False
+):
+    """Proxy route for /readConversation - gets API key by project_id and forwards request"""
+    try:
+        # Get API key using project_id
+        api_key = await get_api_key_by_project_id(project_id)
+        
+        # Prepare query parameters
+        params = {
+            "chat_id": chat_id,
+            "test": test
+        }
+        
+        # Make request to chat service
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.get(
+                f"{CHAT_API_BASE_URL}/readConversation",
+                params=params,
+                headers={
+                    "Authorization": f"Bearer {api_key}"
+                }
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Chat service returned status {response.status_code}: {response.text}")
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Chat service error: {response.text}"
+                )
+            
+            return response.json()
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in proxy_read_conversation: {e}")
+        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
 
 @app.get("/health")
 async def health_check():
