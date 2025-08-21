@@ -10,6 +10,8 @@ from contextlib import asynccontextmanager
 import uvicorn
 from dotenv import load_dotenv
 import httpx
+import hmac
+import hashlib
 
 load_dotenv()
 
@@ -54,17 +56,19 @@ class SuccessResponse(BaseModel):
     message: str
     success: bool = True
 
-# New request models for proxy routes
+# Updated request models for proxy routes with HMAC signature
 class ProxyNewUserMessageRequest(BaseModel):
     project_id: str
     user_message: str
     consumer_id: str
+    hmac_signature: str
     chat_id: Optional[str] = None
     test: Optional[bool] = False
 
 class ProxyListConsumerChatsRequest(BaseModel):
     project_id: str
     consumer_id: str
+    hmac_signature: str
     test: Optional[bool] = False
 
 class ProxyReadConversationRequest(BaseModel):
@@ -100,6 +104,21 @@ async def get_api_key_by_project_id(project_id: str) -> str:
     except Exception as e:
         logger.error(f"Error retrieving API key for project_id {project_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Error retrieving API key: {str(e)}")
+
+# Helper function to validate HMAC signature
+def validate_hmac_signature(api_key: str, consumer_id: str, provided_signature: str) -> bool:
+    """Validate HMAC signature using API key and consumer ID"""
+    try:
+        expected_signature = hmac.new(
+            api_key.encode('utf-8'),
+            consumer_id.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        
+        return hmac.compare_digest(expected_signature, provided_signature)
+    except Exception as e:
+        logger.error(f"Error validating HMAC signature: {e}")
+        return False
 
 # Lifespan context manager for Supabase client initialization
 @asynccontextmanager
@@ -315,13 +334,21 @@ async def delete_project(request: DeleteProjectRequest):
         logger.error(f"Error deleting project: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-# New proxy routes
+# Updated proxy routes with HMAC validation
 @app.post("/proxy-new-user-message")
 async def proxy_new_user_message(request: ProxyNewUserMessageRequest):
-    """Proxy route for /newUserMessage - gets API key by project_id and forwards request"""
+    """Proxy route for /newUserMessage - gets API key by project_id and forwards request with HMAC validation"""
     try:
         # Get API key using project_id
         api_key = await get_api_key_by_project_id(request.project_id)
+        
+        # Validate HMAC signature if not 'anon'
+        if request.hmac_signature != 'anon':
+            if not validate_hmac_signature(api_key, request.consumer_id, request.hmac_signature):
+                raise HTTPException(
+                    status_code=401,
+                    detail="HMAC signature validation failed. Authentication error."
+                )
         
         # Prepare request payload for the chat service
         chat_request_payload = {
@@ -361,12 +388,21 @@ async def proxy_new_user_message(request: ProxyNewUserMessageRequest):
 async def proxy_list_consumer_chats(
     project_id: str,
     consumer_id: str,
+    hmac_signature: str,
     test: bool = False
 ):
-    """Proxy route for /listAllProjectConsumerChats - gets API key by project_id and forwards request"""
+    """Proxy route for /listAllProjectConsumerChats - gets API key by project_id and forwards request with HMAC validation"""
     try:
         # Get API key using project_id
         api_key = await get_api_key_by_project_id(project_id)
+        
+        # Validate HMAC signature if not 'anon'
+        if hmac_signature != 'anon':
+            if not validate_hmac_signature(api_key, consumer_id, hmac_signature):
+                raise HTTPException(
+                    status_code=401,
+                    detail="HMAC signature validation failed. Authentication error."
+                )
         
         # Prepare query parameters
         params = {
