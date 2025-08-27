@@ -22,8 +22,9 @@ logger = logging.getLogger(__name__)
 # Supabase client
 supabase: Optional[Client] = None
 
-# Chat API base URL - configure this according to your setup
+# API base URLs
 CHAT_API_BASE_URL = os.getenv("CHAT_API_BASE_URL", "http://82.112.227.182:8080")
+SEARCH_API_BASE_URL = os.getenv("SEARCH_API_BASE_URL")
 
 # Pydantic models
 class InitializeProjectRequest(BaseModel):
@@ -76,6 +77,22 @@ class ProxyReadConversationRequest(BaseModel):
     chat_id: str
     test: Optional[bool] = False
 
+# New request models for search proxy routes
+class ProxyAutocompleteRequest(BaseModel):
+    project_id: str
+    consumer_id: str
+    hmac_signature: str
+    query: str
+    test: Optional[bool] = False
+
+class ProxySearchRequest(BaseModel):
+    project_id: str
+    consumer_id: str
+    hmac_signature: str
+    query: str
+    search_type: str = "keyword"  # "keyword" or "hybrid"
+    test: Optional[bool] = False
+
 # Supabase client function
 def get_supabase_client() -> Client:
     """Get Supabase client"""
@@ -83,7 +100,7 @@ def get_supabase_client() -> Client:
         raise HTTPException(status_code=500, detail="Supabase client not available")
     return supabase
 
-# Helper function to get API key by project_id
+# Helper function to get API key by project_id from chat_api_keys table
 async def get_api_key_by_project_id(project_id: str) -> str:
     """Get API key from chat_api_keys table using project_id"""
     client = get_supabase_client()
@@ -104,6 +121,28 @@ async def get_api_key_by_project_id(project_id: str) -> str:
     except Exception as e:
         logger.error(f"Error retrieving API key for project_id {project_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Error retrieving API key: {str(e)}")
+
+# Helper function to get search API key by project_id from search_api_keys table
+async def get_search_api_key_by_project_id(project_id: str) -> str:
+    """Get search API key from search_api_keys table using project_id"""
+    client = get_supabase_client()
+    
+    try:
+        result = client.table("search_api_keys").select("api_key").eq("project_id", project_id).execute()
+        
+        if not result.data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No search API key found for project_id: {project_id}"
+            )
+        
+        return result.data[0]["api_key"]
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving search API key for project_id {project_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving search API key: {str(e)}")
 
 # Helper function to validate HMAC signature
 def validate_hmac_signature(api_key: str, consumer_id: str, provided_signature: str) -> bool:
@@ -475,6 +514,117 @@ async def proxy_read_conversation(
         raise
     except Exception as e:
         logger.error(f"Error in proxy_read_conversation: {e}")
+        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
+
+# New search proxy routes
+@app.post("/proxy-autocomplete")
+async def proxy_autocomplete(request: ProxyAutocompleteRequest):
+    """Proxy route for /autocomplete - gets search API key by project_id and forwards request with HMAC validation"""
+    try:
+        if not SEARCH_API_BASE_URL:
+            raise HTTPException(
+                status_code=500,
+                detail="SEARCH_API_BASE_URL environment variable is not configured"
+            )
+        
+        # Get search API key using project_id
+        api_key = await get_search_api_key_by_project_id(request.project_id)
+        
+        # Validate HMAC signature if not 'anon'
+        if request.hmac_signature != 'anon':
+            if not validate_hmac_signature(api_key, request.consumer_id, request.hmac_signature):
+                raise HTTPException(
+                    status_code=401,
+                    detail="HMAC signature validation failed. Authentication error."
+                )
+        
+        # Prepare request payload for the search service
+        autocomplete_request_payload = {
+            "consumer_id": request.consumer_id,
+            "autocomplete_term": request.query,
+            "test": request.test
+        }
+        
+        # Make request to search service
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{SEARCH_API_BASE_URL}/autocomplete",
+                json=autocomplete_request_payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                }
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Search service returned status {response.status_code}: {response.text}")
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Search service error: {response.text}"
+                )
+            
+            return response.json()
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in proxy_autocomplete: {e}")
+        raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
+
+@app.post("/proxy-search")
+async def proxy_search(request: ProxySearchRequest):
+    """Proxy route for /search - gets search API key by project_id and forwards request with HMAC validation"""
+    try:
+        if not SEARCH_API_BASE_URL:
+            raise HTTPException(
+                status_code=500,
+                detail="SEARCH_API_BASE_URL environment variable is not configured"
+            )
+        
+        # Get search API key using project_id
+        api_key = await get_search_api_key_by_project_id(request.project_id)
+        
+        # Validate HMAC signature if not 'anon'
+        if request.hmac_signature != 'anon':
+            if not validate_hmac_signature(api_key, request.consumer_id, request.hmac_signature):
+                raise HTTPException(
+                    status_code=401,
+                    detail="HMAC signature validation failed. Authentication error."
+                )
+        
+        # Prepare request payload for the search service
+        search_request_payload = {
+            "consumer_id": request.consumer_id,
+            "search_term": request.query,
+            "search_type": request.search_type,
+            "semantic_ratio": 0.7,
+            "test": request.test
+        }
+        
+        # Make request to search service
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{SEARCH_API_BASE_URL}/search",
+                json=search_request_payload,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                }
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Search service returned status {response.status_code}: {response.text}")
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Search service error: {response.text}"
+                )
+            
+            return response.json()
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in proxy_search: {e}")
         raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
 
 @app.get("/health")
