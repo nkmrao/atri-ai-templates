@@ -84,6 +84,7 @@ class ProxyAutocompleteRequest(BaseModel):
     hmac_signature: str
     query: str
     test: Optional[bool] = False
+    max_results: Optional[int] = 10
 
 class ProxySearchRequest(BaseModel):
     project_id: str
@@ -92,6 +93,8 @@ class ProxySearchRequest(BaseModel):
     query: str
     search_type: str = "keyword"  # "keyword" or "hybrid"
     test: Optional[bool] = False
+    limit: Optional[int] = None
+    offset: Optional[int] = None
 
 # Supabase client function
 def get_supabase_client() -> Client:
@@ -542,6 +545,7 @@ async def proxy_autocomplete(request: ProxyAutocompleteRequest):
         autocomplete_request_payload = {
             "consumer_id": request.consumer_id,
             "autocomplete_term": request.query,
+            "limit": request.max_results,
             "test": request.test
         }
         
@@ -598,6 +602,8 @@ async def proxy_search(request: ProxySearchRequest):
             "search_term": request.query,
             "search_type": request.search_type,
             "semantic_ratio": 0.7,
+            "limit": request.limit, 
+            "offset": request.offset,
             "test": request.test
         }
         
